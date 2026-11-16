@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>试验室布置三维编辑器</title>
+  <link rel="stylesheet" href="./src/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">试验室布置三维编辑器</div>
+      <div class="toolbar">
+        <button id="mode-translate" class="active" title="快捷键 W">移动 W</button>
+        <button id="mode-rotate" title="快捷键 E">旋转 E</button>
+        <button id="mode-scale" title="快捷键 R">缩放 R</button>
+        <span class="sep"></span>
+        <button id="space-toggle" title="快捷键 Q">空间：世界 (Q)</button>
+        <button id="cam-toggle" title="透视/正交投影切换 (P)">投影：透视 (P)</button>
+        <span class="sep"></span>
+        <button id="save-btn">保存布局</button>
+        <button id="load-btn">加载布局</button>
+        <button id="export-btn">导出 JSON</button>
+        <input id="load-file" type="file" accept="application/json,.json" hidden />
+      </div>
+    </header>
+
+    <div class="main">
+      <aside class="left-panel">
+        <h3>自制设备库（点击添加）</h3>
+        <ul id="equipment-list"></ul>
+        <h3>场景设备</h3>
+        <ul id="scene-list"></ul>
+        <button id="delete-btn" class="danger" disabled>删除选中设备 (Del)</button>
+      </aside>
+
+      <div class="viewport-wrap">
+        <canvas id="viewport"></canvas>
+        <div id="status-line" class="status-line">就绪</div>
+        <div class="hint">
+          左键拖动彩色轴/环直接操纵设备；空白处拖动旋转视角，滚轮缩放。<br/>
+          当视线接近操纵轴时，该轴会自动退化到平面约束并在状态栏提示，物体不会飞出。
+        </div>
+      </div>
+
+      <aside class="right-panel">
+        <h3>实际变换（只读）</h3>
+        <div id="inspector"><p class="muted">未选中设备</p></div>
+        <h3>约束轴说明</h3>
+        <ul class="legend">
+          <li><span class="dot x"></span>红 = X 轴</li>
+          <li><span class="dot y"></span>绿 = Y 轴</li>
+          <li><span class="dot z"></span>蓝 = Z 轴</li>
+          <li>移动：轴上拖动为单轴约束，平面块为双轴约束</li>
+          <li>旋转：彩色环为绕该轴旋转</li>
+          <li>缩放：轴上拖动为单轴（局部空间），中心块为等比</li>
+        </ul>
+        <div class="safety">
+          安全提示：本工具仅用于实验室内设备的几何摆放与空间布局演示。
+          设备可在场景中摆放不代表其满足真实安装条件；电气、承重、通风、
+          防爆与间距等安全合规结论须由专业人员依据规范另行评估。
+        </div>
+      </aside>
+    </div>
+  </div>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

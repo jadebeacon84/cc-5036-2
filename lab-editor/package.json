@@ -1,0 +1,21 @@
+{
+  "name": "lab-layout-editor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "试验室布置三维编辑器：轴向操纵器直接交互，稳定求交与退化处理",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test test/math3d.test.js test/gizmo.test.js",
+    "test:browser": "node test/browser.smoke.js"
+  },
+  "dependencies": {
+    "three": "^0.170.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.65.1",
+    "vite": "^6.0.0"
+  }
+}
