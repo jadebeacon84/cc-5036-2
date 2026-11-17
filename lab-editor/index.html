@@ -18,6 +18,7 @@
         <button id="space-toggle" title="快捷键 Q">空间：世界 (Q)</button>
         <button id="cam-toggle" title="透视/正交投影切换 (P)">投影：透视 (P)</button>
         <span class="sep"></span>
+        <button id="undo-btn" title="撤销最近一次变换（Ctrl+Z）" disabled>撤销 (Ctrl+Z)</button>
         <button id="save-btn">保存布局</button>
         <button id="load-btn">加载布局</button>
         <button id="export-btn">导出 JSON</button>
@@ -39,6 +40,7 @@
         <div id="status-line" class="status-line">就绪</div>
         <div class="hint">
           左键拖动彩色轴/环直接操纵设备；空白处拖动旋转视角，滚轮缩放。<br/>
+          Shift+点击（或 Shift+列表项）多选后一次同时变换；Esc 取消拖动并恢复原值，Ctrl+Z 撤销。<br/>
           当视线接近操纵轴时，该轴会自动退化到平面约束并在状态栏提示，物体不会飞出。
         </div>
       </div>

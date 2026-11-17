@@ -38,10 +38,49 @@ const gizmo = new TransformGizmo(camera);
 scene.add(gizmo.group);
 gizmo.onStatus = (msg) => setStatus(msg);
 
-const selectionHelper = new THREE.BoxHelper(new THREE.Object3D(), 0xffeb3b);
-selectionHelper.visible = false;
-scene.add(selectionHelper);
+// 多选高亮：每个选中设备一个 BoxHelper
+const selectionHelpers = [];
+function refreshSelectionHelpers() {
+  while (selectionHelpers.length) {
+    const helper = selectionHelpers.pop();
+    scene.remove(helper);
+    helper.geometry?.dispose?.();
+    helper.material?.dispose?.();
+  }
+  for (const obj of selectedSet) {
+    const helper = new THREE.BoxHelper(obj, 0xffeb3b);
+    scene.add(helper);
+    selectionHelpers.push(helper);
+  }
+}
 
+// 变换撤销栈：只记录变换操纵产生的 before/after 局部快照（由 gizmo 内核生成）
+const undoStack = [];
+const MAX_UNDO = 50;
+const undoBtn = document.getElementById('undo-btn');
+function updateUndoButton() {
+  undoBtn.disabled = undoStack.length === 0;
+}
+function pushUndo(commit) {
+  if (!commit || !commit.before?.length) return;
+  undoStack.push(commit);
+  if (undoStack.length > MAX_UNDO) undoStack.shift();
+  updateUndoButton();
+}
+function undoLast() {
+  const commit = undoStack.pop();
+  if (!commit) return;
+  gizmo.restore(commit.before);
+  updateUndoButton();
+  refreshSceneList();
+  updateInspector();
+  scheduleAutosave();
+  setStatus(`已撤销变换，剩余可撤销 ${undoStack.length} 步`);
+}
+undoBtn.addEventListener('click', undoLast);
+
+// 选中集合（保持插入顺序）；selected 是主对象（操纵器锚点 = 集合第一个）
+const selectedSet = [];
 let selected = null;
 let autosaveTimer = null;
 
@@ -87,23 +126,28 @@ function refreshSceneList() {
   equipmentRoot.children.forEach((obj) => {
     const li = document.createElement('li');
     li.textContent = obj.userData.label;
-    li.className = obj === selected ? 'scene-item selected' : 'scene-item';
-    li.addEventListener('click', () => selectObject(obj));
+    li.className = selectedSet.includes(obj) ? 'scene-item selected' : 'scene-item';
+    li.addEventListener('click', (ev) => selectObject(obj, ev.shiftKey));
     sceneListEl.appendChild(li);
   });
-  deleteBtn.disabled = !selected;
+  deleteBtn.disabled = !selectedSet.length;
 }
 
-function selectObject(obj) {
-  selected = obj;
-  if (obj) {
-    gizmo.attach(obj);
-    selectionHelper.setFromObject(obj);
-    selectionHelper.visible = true;
+// additive=true（Shift）时切换多选；否则单选。主对象始终是集合第一个。
+function selectObject(obj, additive = false) {
+  if (!obj) {
+    selectedSet.length = 0;
+  } else if (additive) {
+    const idx = selectedSet.indexOf(obj);
+    if (idx >= 0) selectedSet.splice(idx, 1);
+    else selectedSet.push(obj);
   } else {
-    gizmo.detach();
-    selectionHelper.visible = false;
+    selectedSet.length = 0;
+    selectedSet.push(obj);
   }
+  selected = selectedSet[0] || null;
+  gizmo.setObjects(selectedSet);
+  refreshSelectionHelpers();
   refreshSceneList();
   updateInspector();
 }
@@ -113,7 +157,7 @@ const inspectorEl = document.getElementById('inspector');
 const f = (n) => Number(n).toFixed(3);
 
 function updateInspector() {
-  if (!selected) {
+  if (!selectedSet.length) {
     inspectorEl.innerHTML = '<p class="muted">未选中设备</p>';
     return;
   }
@@ -126,10 +170,14 @@ function updateInspector() {
   const activeAxis = gizmo.dragging && gizmo.drag?.handle
     ? describeHandle(gizmo.drag.handle)
     : '未拖拽（悬停/按下轴或平面）';
+  const multiNote = selectedSet.length > 1
+    ? `<tr><td>多选</td><td>共 ${selectedSet.length} 台，统一世界意图、各自父逆换算</td></tr>`
+    : '';
 
   inspectorEl.innerHTML = `
     <table>
-      <tr><td>设备</td><td>${obj.userData.label}</td></tr>
+      <tr><td>设备</td><td>${obj.userData.label}${selectedSet.length > 1 ? `（主，+${selectedSet.length - 1}）` : ''}</td></tr>
+      ${multiNote}
       <tr><td>模式</td><td>${modeText} / ${gizmo.space === 'world' ? '世界空间' : '局部空间'}</td></tr>
       <tr><td>世界位置 (m)</td><td>(${f(wp.x)}, ${f(wp.y)}, ${f(wp.z)})</td></tr>
       <tr><td>局部位置 (m)</td><td>(${f(obj.position.x)}, ${f(obj.position.y)}, ${f(obj.position.z)})</td></tr>
@@ -159,7 +207,7 @@ canvas.addEventListener('pointerdown', (ev) => {
   if (ev.button !== 0) return;
   const { ray } = rayFromPointer(camera, canvas, ev.clientX, ev.clientY);
   gizmo.update();
-  const handle = selected ? gizmo.pick(ray) : null;
+  const handle = selectedSet.length ? gizmo.pick(ray) : null;
 
   if (handle) {
     ev.preventDefault();
@@ -167,10 +215,10 @@ canvas.addEventListener('pointerdown', (ev) => {
     gizmo.beginDrag(handle, ray);
     pointerDown = { id: ev.pointerId, draggingGizmo: true };
     orbit.enabled = false;
-    setStatus(`拖拽中：${describeHandle(handle)}`);
+    setStatus(`拖拽中：${describeHandle(handle)}（Esc 取消并恢复，Ctrl+Z 撤销）`);
     updateInspector();
   } else {
-    pointerDown = { id: ev.pointerId, draggingGizmo: false, x: ev.clientX, y: ev.clientY };
+    pointerDown = { id: ev.pointerId, draggingGizmo: false, x: ev.clientX, y: ev.clientY, shift: ev.shiftKey };
   }
 });
 
@@ -183,7 +231,7 @@ canvas.addEventListener('pointermove', (ev) => {
   }
   if (!gizmo.dragging) {
     gizmo.update();
-    const handle = selected ? gizmo.pick(ray) : null;
+    const handle = selectedSet.length ? gizmo.pick(ray) : null;
     canvas.style.cursor = handle ? 'crosshair' : 'default';
   }
 });
@@ -191,11 +239,12 @@ canvas.addEventListener('pointermove', (ev) => {
 function finishPointer(ev) {
   if (!pointerDown) return;
   if (pointerDown.draggingGizmo) {
-    gizmo.endDrag();
+    const commit = gizmo.endDrag();
     orbit.enabled = true;
+    pushUndo(commit);
     scheduleAutosave();
   } else {
-    // 单击空白/设备：做场景拾取选择
+    // 单击空白/设备：做场景拾取选择（Shift 追加多选）
     const moved = Math.hypot(ev.clientX - pointerDown.x, ev.clientY - pointerDown.y);
     if (moved < 5) {
       const { ray: clickRay } = rayFromPointer(camera, canvas, ev.clientX, ev.clientY);
@@ -205,8 +254,8 @@ function finishPointer(ev) {
       if (hits.length) {
         let root = hits[0].object;
         while (root && !root.userData?.isEquipment) root = root.parent;
-        if (root) selectObject(root);
-      } else {
+        if (root) selectObject(root, pointerDown.shift || ev.shiftKey);
+      } else if (!ev.shiftKey) {
         selectObject(null);
       }
     }
@@ -215,9 +264,14 @@ function finishPointer(ev) {
 }
 canvas.addEventListener('pointerup', finishPointer);
 canvas.addEventListener('pointercancel', () => {
-  if (pointerDown?.draggingGizmo) gizmo.endDrag();
+  if (pointerDown?.draggingGizmo) {
+    // 取消拖动：内核逐对象恢复 beginDrag 快照，不入撤销栈、不清空父变换
+    gizmo.cancelDrag();
+    setStatus('已取消拖动，设备恢复到拖动前姿态');
+  }
   pointerDown = null;
   orbit.enabled = true;
+  updateInspector();
 });
 
 // ---------- 工具栏 ----------
@@ -262,24 +316,33 @@ camBtn.addEventListener('click', toggleProjection);
 window.addEventListener('keydown', (ev) => {
   if (ev.target.tagName === 'INPUT') return;
   const key = ev.key.toLowerCase();
-  if (key === 'w') setMode('translate');
+  if (key === 'z' && (ev.ctrlKey || ev.metaKey)) {
+    ev.preventDefault();
+    undoLast();
+  } else if (key === 'escape' && gizmo.dragging) {
+    // Esc 取消当前拖动：恢复 beginDrag 快照，不入撤销栈
+    gizmo.cancelDrag();
+    orbit.enabled = true;
+    pointerDown = null;
+    updateInspector();
+    setStatus('已取消拖动，设备恢复到拖动前姿态');
+  } else if (key === 'w') setMode('translate');
   else if (key === 'e') setMode('rotate');
   else if (key === 'r') setMode('scale');
   else if (key === 'q') toggleSpace();
   else if (key === 'p') toggleProjection();
   else if (key === 'delete' || key === 'backspace') {
-    if (selected) deleteSelected();
+    if (selectedSet.length) deleteSelected();
   }
 });
 
 function deleteSelected() {
-  if (!selected) return;
-  const obj = selected;
-  equipmentRoot.remove(obj);
+  if (!selectedSet.length) return;
+  for (const obj of [...selectedSet]) equipmentRoot.remove(obj);
   selectObject(null);
   refreshSceneList();
   scheduleAutosave();
-  setStatus(`已删除：${obj.userData.label}`);
+  setStatus('已删除选中设备');
 }
 deleteBtn.addEventListener('click', deleteSelected);
 
@@ -353,10 +416,7 @@ function tick() {
   requestAnimationFrame(tick);
   orbit.update();
   gizmo.update();
-  if (selected) {
-    selectionHelper.setFromObject(selected);
-    selectionHelper.visible = true;
-  }
+  for (const helper of selectionHelpers) helper.update();
   updateInspectorThrottled();
   renderer.render(scene, camera);
 }

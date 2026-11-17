@@ -23,3 +23,8 @@ __pycache__/
 *.log
 .env
 .env.*
+
+# Preserve required transform regression evidence
+!/evidence/multiselect-before-fix.log
+!/evidence/node-after-fix.log
+!/evidence/browser-after-fix.log

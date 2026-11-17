@@ -18,6 +18,7 @@ const MAX_SCALE = 200;
 const PARALLEL_THRESHOLD = 1e-8; // sin²(夹角) 小于此值即判定退化（约 0.0057°）
 
 const v3 = (v) => [v.x, v.y, v.z];
+const IDENTITY_MATRIX = () => new THREE.Matrix4().identity();
 
 /**
  * 自定义三维变换操纵器。
@@ -26,12 +27,16 @@ const v3 = (v) => [v.x, v.y, v.z];
  *  2. 拖拽开始保存基准快照，每次 move 都从快照按“同一意图”重新计算，
  *     不做增量累加，往返拖动可精确回到原位；
  *  3. 操纵器世界尺度按相机参数独立计算，与被操纵对象几何尺度无关；
- *  4. 不绑定 DOM：外部注入 THREE.Ray，便于在 Node 下用合成射线测试。
+ *  4. 不绑定 DOM：外部注入 THREE.Ray，便于在 Node 下用合成射线测试；
+ *  5. 支持多选：拖拽意图（世界增量/世界旋转/缩放系数）只对主对象计算一次，
+ *     再按“每个对象各自的父节点世界逆矩阵”分别换算回局部。
+ *     绝不为了省事而清空/重置父变换，也绝不共用某一个对象的父变换。
  */
 export class TransformGizmo {
   constructor(camera) {
     this.camera = camera;
-    this.object = null;
+    this.objects = [];
+    this.object = null; // 主对象（多选时的第一个，操纵器锚点）
     this.mode = 'translate'; // translate | rotate | scale
     this.space = 'world'; // world | local
     this.group = new THREE.Group();
@@ -203,28 +208,38 @@ export class TransformGizmo {
     this.space = space; // 缩放始终使用局部轴，见 _activeAxes
   }
 
+  // 多选入口：去重后保存全部对象，第一个作为操纵器锚点（主对象）
+  setObjects(objects) {
+    const list = [];
+    for (const obj of objects || []) {
+      if (obj && !list.includes(obj)) list.push(obj);
+    }
+    this.objects = list;
+    this.object = list[0] || null;
+    this.group.visible = list.length > 0;
+    this.dragging = false;
+  }
+
   attach(object) {
-    this.object = object;
-    this.group.visible = true;
+    this.setObjects(object ? [object] : []);
   }
 
   detach() {
-    this.object = null;
-    this.group.visible = false;
-    this.dragging = false;
+    this.setObjects([]);
   }
 
   // ---------- 每帧更新：位置/朝向/屏幕恒定尺度 ----------
 
   update() {
-    if (!this.object) return;
-    this.object.updateWorldMatrix(true, false);
-    const worldPos = this.object.getWorldPosition(new THREE.Vector3());
+    const primary = this.object;
+    if (!primary) return;
+    primary.updateWorldMatrix(true, false);
+    const worldPos = primary.getWorldPosition(new THREE.Vector3());
     this.group.position.copy(worldPos);
 
     const useLocal = this.space === 'local' || this.mode === 'scale';
     if (useLocal) {
-      this.object.getWorldQuaternion(this.group.quaternion);
+      primary.getWorldQuaternion(this.group.quaternion);
     } else {
       this.group.quaternion.identity();
     }
@@ -249,7 +264,7 @@ export class TransformGizmo {
   // ---------- 拾取 ----------
 
   pick(ray) {
-    if (!this.object) return null;
+    if (!this.objects.length) return null;
     this.raycaster.set(ray.origin, ray.direction);
     const candidates = this.pickMeshes.filter((m) => m.userData.handle.mode === this.mode);
     const hits = this.raycaster.intersectObjects(candidates, false);
@@ -259,34 +274,47 @@ export class TransformGizmo {
 
   // ---------- 拖拽（快照基准，不累积误差） ----------
 
-  beginDrag(handle, ray) {
-    const obj = this.object;
-    if (!obj) return;
+  // 为单个被操纵对象建立基准：父变换取“该对象自己的父节点”，多选时彼此独立
+  _makeTarget(obj) {
     obj.updateWorldMatrix(true, false);
     const parent = obj.parent;
-    parent.updateWorldMatrix(true, false);
-
-    const base = {
-      handle,
+    if (parent) parent.updateWorldMatrix(true, false);
+    const parentMatrixWorld = parent ? parent.matrixWorld : IDENTITY_MATRIX();
+    const parentQuat = new THREE.Quaternion();
+    if (parent) {
+      parent.matrixWorld.decompose(new THREE.Vector3(), parentQuat, new THREE.Vector3());
+    }
+    return {
+      object: obj,
       localPosition: obj.position.clone(),
       localQuaternion: obj.quaternion.clone(),
       localScale: obj.scale.clone(),
       worldPosition: obj.getWorldPosition(new THREE.Vector3()),
       worldQuaternion: obj.getWorldQuaternion(new THREE.Quaternion()),
-      parentWorldInverse: parent.matrixWorld.clone().invert(),
+      parentWorldInverse: parentMatrixWorld.clone().invert(),
+      parentQuaternion: parentQuat.clone()
+    };
+  }
+
+  beginDrag(handle, ray) {
+    if (!this.objects.length) return;
+    const targets = this.objects.map((obj) => this._makeTarget(obj));
+    const primary = targets[0];
+
+    const base = {
+      handle,
+      targets,
+      // 主对象锚点：射线求交只在这里发生一次，得到的是共享的“世界意图”
+      worldPosition: primary.worldPosition,
+      worldQuaternion: primary.worldQuaternion,
       gizmoSize: this.group.scale.x,
       ray0: { origin: ray.origin.clone(), direction: ray.direction.clone() }
     };
-    const parentPos = new THREE.Vector3();
-    const parentQuat = new THREE.Quaternion();
-    const parentScale = new THREE.Vector3();
-    parent.matrixWorld.decompose(parentPos, parentQuat, parentScale);
-    base.parentQuaternion = parentQuat.clone();
 
-    // 当前生效的世界坐标轴方向
+    // 当前生效的世界坐标轴方向（以主对象世界姿态为准，缩放/局部空间跟随对象）
     const axes = {};
     const basisQ = this.mode === 'scale' || this.space === 'local'
-      ? base.worldQuaternion
+      ? primary.worldQuaternion
       : new THREE.Quaternion();
     for (const a of ['x', 'y', 'z']) {
       axes[a] = AXIS_VECTORS[a].clone().applyQuaternion(basisQ).normalize();
@@ -316,7 +344,7 @@ export class TransformGizmo {
   }
 
   updateDrag(ray) {
-    if (!this.dragging || !this.object) return;
+    if (!this.dragging || !this.objects.length) return;
     const d = this.drag;
     const handle = d.handle;
     const dir = ray.direction;
@@ -348,11 +376,18 @@ export class TransformGizmo {
     return this.drag.axes[best];
   }
 
+  // 返回射线在操纵轴上的有符号参数（相对锚点）；视线与轴近乎平行时 parallel=true。
+  // 射线-直线最小二乘最近点解：锚点偏离射线平面时给出的是沿轴的真实最近点参数，
+  // 这是单选/多选统一的轴意图来源；多选时只对主对象求一次，再按各父逆矩阵换算。
+  _axisParameter(d, origin, dir, axis, anchor) {
+    return rayAxis(v3(origin), v3(dir), v3(anchor), v3(axis), PARALLEL_THRESHOLD);
+  }
+
   _dragTranslateAxis(d, origin, dir) {
     const axis = d.axes[d.handle.axis];
     const anchor = d.worldPosition;
-    const r0 = rayAxis(v3(d.ray0.origin), v3(d.ray0.direction), v3(anchor), v3(axis), PARALLEL_THRESHOLD);
-    const r1 = rayAxis(v3(origin), v3(dir), v3(anchor), v3(axis), PARALLEL_THRESHOLD);
+    const r0 = this._axisParameter(d, d.ray0.origin, d.ray0.direction, axis, anchor);
+    const r1 = this._axisParameter(d, origin, dir, axis, anchor);
 
     let delta;
     if (r1.parallel || r0.parallel) {
@@ -369,8 +404,12 @@ export class TransformGizmo {
       this._noteDegradation(false, '');
     }
     if (!Number.isFinite(delta)) return; // 最后防线：拒绝非法值，物体保持不动
-    const world = anchor.clone().addScaledVector(axis, delta);
-    this._applyWorldPosition(world, d);
+    const worldDelta = new THREE.Vector3().copy(axis).multiplyScalar(delta);
+    for (const target of d.targets) {
+      // 同一世界增量，叠加到各对象自己的基准世界位置，再经各自父逆矩阵回局部
+      const world = target.worldPosition.clone().add(worldDelta);
+      this._applyWorldPosition(target, world);
+    }
   }
 
   _dragTranslatePlane(d, origin, dir) {
@@ -399,8 +438,11 @@ export class TransformGizmo {
     if (r0.parallel || r1.parallel) return; // 极端情况保持不动，绝不飞走
     const p0 = new THREE.Vector3(...r0.point);
     const p1 = new THREE.Vector3(...r1.point);
-    const world = anchor.clone().add(p1.sub(p0));
-    this._applyWorldPosition(world, d);
+    const worldDelta = p1.sub(p0);
+    for (const target of d.targets) {
+      const world = target.worldPosition.clone().add(worldDelta);
+      this._applyWorldPosition(target, world);
+    }
   }
 
   _dragRotate(d, origin, dir) {
@@ -429,16 +471,20 @@ export class TransformGizmo {
     }
     if (!Number.isFinite(angle)) return;
 
-    const qDelta = new THREE.Quaternion().setFromAxisAngle(axis, angle);
     if (this.space === 'local' && this.mode === 'rotate') {
-      // 局部旋转：右乘到基准局部姿态
+      // 局部旋转：右乘到每个对象各自的基准局部姿态
       const qLocalAxis = new THREE.Quaternion().setFromAxisAngle(AXIS_VECTORS[d.handle.axis], angle);
-      this.object.quaternion.copy(d.localQuaternion).multiply(qLocalAxis);
+      for (const target of d.targets) {
+        target.object.quaternion.copy(target.localQuaternion).multiply(qLocalAxis);
+      }
     } else {
-      // 世界旋转：左乘到基准世界姿态，再换回父节点局部空间
-      const qWorld = qDelta.multiply(d.worldQuaternion);
-      const qLocal = d.parentQuaternion.clone().invert().multiply(qWorld);
-      this.object.quaternion.copy(qLocal);
+      // 世界旋转：同一世界旋转增量左乘到各对象基准世界姿态，再经各自父姿态换回局部
+      const qDelta = new THREE.Quaternion().setFromAxisAngle(axis, angle);
+      for (const target of d.targets) {
+        const qWorld = qDelta.clone().multiply(target.worldQuaternion);
+        const qLocal = target.parentQuaternion.clone().invert().multiply(qWorld);
+        target.object.quaternion.copy(qLocal);
+      }
     }
   }
 
@@ -446,8 +492,8 @@ export class TransformGizmo {
     // 缩放始终沿局部轴（非均匀缩放的语义要求），axis 已用世界姿态换算
     const axis = d.axes[d.handle.axis];
     const anchor = d.worldPosition;
-    const r0 = rayAxis(v3(d.ray0.origin), v3(d.ray0.direction), v3(anchor), v3(axis), PARALLEL_THRESHOLD);
-    const r1 = rayAxis(v3(origin), v3(dir), v3(anchor), v3(axis), PARALLEL_THRESHOLD);
+    const r0 = this._axisParameter(d, d.ray0.origin, d.ray0.direction, axis, anchor);
+    const r1 = this._axisParameter(d, origin, dir, axis, anchor);
 
     let delta;
     if (r0.parallel || r1.parallel) {
@@ -462,10 +508,13 @@ export class TransformGizmo {
     }
     if (!Number.isFinite(delta)) return;
     const factor = 1 + delta / Math.max(d.gizmoSize, 1e-6);
-    const next = d.localScale.clone();
-    const comp = next[d.handle.axis] * factor;
-    next[d.handle.axis] = clamp(comp, MIN_SCALE, MAX_SCALE);
-    this.object.scale.copy(next);
+    for (const target of d.targets) {
+      // 同一缩放系数作用于各对象自己的基准局部缩放
+      const next = target.localScale.clone();
+      const comp = next[d.handle.axis] * factor;
+      next[d.handle.axis] = clamp(comp, MIN_SCALE, MAX_SCALE);
+      target.object.scale.copy(next);
+    }
   }
 
   _dragScaleUniform(d, origin, dir) {
@@ -481,22 +530,74 @@ export class TransformGizmo {
     const dist1 = new THREE.Vector3(...r1.point).sub(anchor).length();
     const factor = dist1 / dist0;
     if (!Number.isFinite(factor)) return;
-    const next = d.localScale.clone().multiplyScalar(factor);
-    next.x = clamp(next.x, MIN_SCALE, MAX_SCALE);
-    next.y = clamp(next.y, MIN_SCALE, MAX_SCALE);
-    next.z = clamp(next.z, MIN_SCALE, MAX_SCALE);
-    this.object.scale.copy(next);
+    for (const target of d.targets) {
+      const next = target.localScale.clone().multiplyScalar(factor);
+      next.x = clamp(next.x, MIN_SCALE, MAX_SCALE);
+      next.y = clamp(next.y, MIN_SCALE, MAX_SCALE);
+      next.z = clamp(next.z, MIN_SCALE, MAX_SCALE);
+      target.object.scale.copy(next);
+    }
     this._noteDegradation(false, '');
   }
 
-  _applyWorldPosition(worldPos, d) {
-    const local = worldPos.clone().applyMatrix4(d.parentWorldInverse);
-    this.object.position.copy(local);
+  // 世界坐标 -> 该对象父节点局部坐标。注意必须使用 target 自己的父逆矩阵，
+  // 多选时不同对象的父变换可能完全不同，严禁混用。
+  _applyWorldPosition(target, worldPos) {
+    const local = worldPos.clone().applyMatrix4(target.parentWorldInverse);
+    target.object.position.copy(local);
   }
 
-  endDrag() {
+  // 取消拖动：把每个对象的局部位置/姿态/缩放逐位恢复到 beginDrag 快照，
+  // 父变换从未被修改，因此这里也绝不允许靠重置父变换来“还原”。
+  cancelDrag() {
+    if (this.drag) {
+      for (const target of this.drag.targets) {
+        target.object.position.copy(target.localPosition);
+        target.object.quaternion.copy(target.localQuaternion);
+        target.object.scale.copy(target.localScale);
+      }
+      if (this.onChange) this.onChange(this.object);
+    }
     this.dragging = false;
     this.drag = null;
     this._noteDegradation(false, '就绪');
+  }
+
+  // 提交拖动：返回 before/after 局部变换快照，供上层撤销栈使用；对象上的变换保留。
+  endDrag() {
+    let commit = null;
+    if (this.drag) {
+      commit = {
+        objects: this.drag.targets.map((t) => t.object),
+        before: this.drag.targets.map((t) => ({
+          object: t.object,
+          position: t.localPosition.toArray(),
+          quaternion: t.localQuaternion.toArray(),
+          scale: t.localScale.toArray()
+        })),
+        after: this.drag.targets.map((t) => ({
+          object: t.object,
+          position: t.object.position.toArray(),
+          quaternion: t.object.quaternion.toArray(),
+          scale: t.object.scale.toArray()
+        }))
+      };
+    }
+    this.dragging = false;
+    this.drag = null;
+    this._noteDegradation(false, '就绪');
+    return commit;
+  }
+
+  // 按快照恢复局部变换（撤销入口，内核驱动控件回写）
+  restore(entries) {
+    for (const entry of entries || []) {
+      const obj = entry.object;
+      if (!obj) continue;
+      obj.position.set(...entry.position);
+      obj.quaternion.set(...entry.quaternion);
+      obj.scale.set(...entry.scale);
+    }
+    if (this.onChange) this.onChange(this.object);
   }
 }
